@@ -6,7 +6,7 @@ from textwrap import dedent
 
 from test.support import force_not_colorized
 
-from _pyrepl.simple_interact import InteractiveColoredConsole
+from _pyrepl.console import InteractiveColoredConsole
 
 
 class TestSimpleInteract(unittest.TestCase):
@@ -91,6 +91,14 @@ class TestSimpleInteract(unittest.TestCase):
     def test_runsource_shows_syntax_error_for_failed_compilation(self):
         console = InteractiveColoredConsole()
         source = "print('Hello, world!'"
+        with patch.object(console, "showsyntaxerror") as mock_showsyntaxerror:
+            console.runsource(source)
+            mock_showsyntaxerror.assert_called_once()
+        source = dedent("""\
+        match 1:
+            case {0: _, 0j: _}:
+                pass
+        """)
         with patch.object(console, "showsyntaxerror") as mock_showsyntaxerror:
             console.runsource(source)
             mock_showsyntaxerror.assert_called_once()
