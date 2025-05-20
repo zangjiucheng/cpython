@@ -121,6 +121,15 @@ Deprecated
 Removed
 =======
 
+http.server
+-----------
+
+* Removed the :class:`!CGIHTTPRequestHandler` class
+  and the ``--cgi`` flag from the :program:`python -m http.server`
+  command-line interface. They were deprecated in Python 3.13.
+  (Contributed by Bénédikt Tran in :gh:`133810`.)
+
+
 platform
 --------
 
@@ -134,6 +143,15 @@ sysconfig
 
 * Removed the *check_home* parameter of :func:`sysconfig.is_python_build`.
   (Contributed by Filipe Laíns in :gh:`92897`.)
+
+
+threading
+---------
+
+* Remove support for arbitrary positional or keyword arguments in the C
+  implementation of :class:`~threading.RLock` objects. This was deprecated
+  in Python 3.14.
+  (Contributed by Bénédikt Tran in :gh:`134087`.)
 
 
 typing
