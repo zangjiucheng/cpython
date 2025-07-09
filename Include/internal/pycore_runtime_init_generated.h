@@ -890,6 +890,7 @@ extern "C" {
     INIT_ID(data), \
     INIT_ID(database), \
     INIT_ID(day), \
+    INIT_ID(debug), \
     INIT_ID(decode), \
     INIT_ID(decoder), \
     INIT_ID(default), \
@@ -1133,6 +1134,7 @@ extern "C" {
     INIT_ID(offset_src), \
     INIT_ID(on_type_read), \
     INIT_ID(onceregistry), \
+    INIT_ID(only_active_thread), \
     INIT_ID(only_keys), \
     INIT_ID(oparg), \
     INIT_ID(opcode), \
