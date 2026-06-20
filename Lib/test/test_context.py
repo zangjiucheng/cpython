@@ -9,6 +9,7 @@ import time
 import unittest
 import weakref
 from test import support
+from test.support import import_helper
 from test.support import threading_helper
 
 try:
@@ -1324,6 +1325,30 @@ class HamtTest(unittest.TestCase):
         with self.assertRaises(HashingError):
             with HaskKeyCrasher(error_on_hash=True):
                 h[AA]
+
+
+class ContextVarOOMTest(unittest.TestCase):
+
+    # Python built with Py_TRACE_REFS fail with a fatal error in
+    # _PyRefchain_Trace() on memory allocation error.
+    @unittest.skipIf(support.Py_TRACE_REFS, 'cannot test Py_TRACE_REFS build')
+    @unittest.skipUnless(support.check_impl_detail(cpython=True), 'CPython only')
+    def test_contextvar_set_oom(self):
+        # gh-151773: PyContextVar_Set() called token_new(), which can return
+        # NULL on OOM. The NULL was not checked, so a subsequent failure in
+        # contextvar_set() ran Py_DECREF(NULL) and crashed. Scan the memory
+        # allocation indexes around token_new() to make sure setting a
+        # ContextVar under OOM raises MemoryError instead of segfaulting.
+        _testcapi = import_helper.import_module('_testcapi')
+        var = contextvars.ContextVar('test_contextvar_set_oom', default=None)
+        for i in range(1, 20):
+            try:
+                _testcapi.set_nomemory(i, i + 1)
+                var.set(42)
+            except MemoryError:
+                pass
+            finally:
+                _testcapi.remove_mem_hooks()
 
 
 if __name__ == "__main__":

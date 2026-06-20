@@ -1,0 +1,3 @@
+Fix a crash in :c:func:`PyContextVar_Set` when ``token_new()`` returns
+``NULL`` (e.g. under low memory). The function now checks for the failure
+and returns ``NULL`` instead of calling ``Py_DECREF`` on a ``NULL`` pointer.
