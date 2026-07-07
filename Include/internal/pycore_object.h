@@ -74,7 +74,7 @@ PyAPI_FUNC(int) _PyObject_IsFreed(PyObject *);
 #if defined(Py_GIL_DISABLED)
 #define _PyObject_HEAD_INIT(type)                   \
     {                                               \
-        .ob_ref_local = _Py_IMMORTAL_REFCNT_LOCAL,  \
+        .ob_ref_shared = _Py_REF_SHARED_IMMORTAL,   \
         .ob_flags = _Py_STATICALLY_ALLOCATED_FLAG,  \
         .ob_gc_bits = _PyGC_BITS_DEFERRED,          \
         .ob_type = (type)                           \
@@ -157,12 +157,17 @@ static inline void _Py_RefcntAdd(PyObject* op, Py_ssize_t n)
         Py_ssize_t refcnt = (Py_ssize_t)local + n;
 #  if PY_SSIZE_T_MAX > UINT32_MAX
         if (refcnt > (Py_ssize_t)UINT32_MAX) {
-            // Make the object immortal if the 32-bit local reference count
-            // would overflow.
-            refcnt = _Py_IMMORTAL_REFCNT_LOCAL;
+            // The local reference count would overflow: spill the excess into
+            // the shared reference count rather than immortalizing the object.
+            _Py_atomic_add_ssize(&op->ob_ref_shared,
+                                 (refcnt - 1) << _Py_REF_SHARED_SHIFT);
+            _Py_atomic_store_uint32_relaxed(&op->ob_ref_local, 1);
         }
+        else
 #  endif
-        _Py_atomic_store_uint32_relaxed(&op->ob_ref_local, (uint32_t)refcnt);
+        {
+            _Py_atomic_store_uint32_relaxed(&op->ob_ref_local, (uint32_t)refcnt);
+        }
     }
     else {
         _Py_atomic_add_ssize(&op->ob_ref_shared, (n << _Py_REF_SHARED_SHIFT));
@@ -520,19 +525,28 @@ _PyObject_InitVar(PyVarObject *op, PyTypeObject *typeobj, Py_ssize_t size)
  */
 static inline int
 _Py_TryIncrefFast(PyObject *op) {
-    uint32_t local = _Py_atomic_load_uint32_relaxed(&op->ob_ref_local);
-    local += 1;
-    if (local == 0) {
-        // immortal
-        _Py_INCREF_IMMORTAL_STAT_INC();
-        return 1;
-    }
     if (_Py_IsOwnedByCurrentThread(op)) {
+        uint32_t local = _Py_atomic_load_uint32_relaxed(&op->ob_ref_local);
+        uint32_t new_local = local + 1;
+        if (new_local == 0) {
+            // ob_ref_local would overflow: spill the accumulated local count
+            // into the shared reference count rather than immortalizing.
+            _Py_atomic_add_ssize(&op->ob_ref_shared,
+                _Py_STATIC_CAST(Py_ssize_t, local) << _Py_REF_SHARED_SHIFT);
+            _Py_atomic_store_uint32_relaxed(&op->ob_ref_local, 1);
+        }
+        else {
+            _Py_atomic_store_uint32_relaxed(&op->ob_ref_local, new_local);
+        }
         _Py_INCREF_STAT_INC();
-        _Py_atomic_store_uint32_relaxed(&op->ob_ref_local, local);
 #ifdef Py_REF_DEBUG
         _Py_IncRefTotal(_PyThreadState_GET());
 #endif
+        return 1;
+    }
+    if (_Py_IsImmortal(op)) {
+        // immortal
+        _Py_INCREF_IMMORTAL_STAT_INC();
         return 1;
     }
     return 0;

@@ -81,8 +81,8 @@ whose size is determined when the object is allocated.
         _Py_STATICALLY_ALLOCATED_FLAG, \
         { 0 },                      \
         0,                          \
-        _Py_IMMORTAL_REFCNT_LOCAL,  \
         0,                          \
+        _Py_REF_SHARED_IMMORTAL,    \
         (type),                     \
     },
 #else

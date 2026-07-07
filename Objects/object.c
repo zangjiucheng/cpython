@@ -433,6 +433,20 @@ _Py_DecRefShared(PyObject *o)
     _Py_DecRefSharedDebug(o, NULL, 0);
 }
 
+#ifdef Py_GIL_DISABLED
+// Validate the ob_ref_shared layout used to mark immortal objects (see
+// Include/refcount.h). The immortal count values must sit within the
+// representable shared count range, and the stored ob_ref_shared marker must
+// remain a positive Py_ssize_t so that a plain arithmetic-right-shift check can
+// distinguish immortal objects from ordinary ones with (bounded) large counts.
+static_assert(_Py_IMMORTAL_MINIMUM_SHARED_REFCNT > 0
+              && _Py_IMMORTAL_INITIAL_SHARED_REFCNT >= _Py_IMMORTAL_MINIMUM_SHARED_REFCNT
+              && _Py_IMMORTAL_INITIAL_SHARED_REFCNT <= _Py_REF_SHARED_COUNT_MAX,
+              "immortal shared refcount must fit in the ob_ref_shared count range");
+static_assert(_Py_REF_SHARED_IMMORTAL > 0,
+              "immortal ob_ref_shared marker must be a positive Py_ssize_t");
+#endif
+
 void
 _Py_MergeZeroLocalRefcount(PyObject *op)
 {
@@ -489,6 +503,9 @@ _Py_ExplicitMergeRefcount(PyObject *op, Py_ssize_t extra)
         new_shared = _Py_REF_SHARED(refcnt, _Py_REF_MERGED);
     } while (!_Py_atomic_compare_exchange_ssize(&op->ob_ref_shared,
                                                 &shared, new_shared));
+    // An ordinary object's merged count must never reach the reserved immortal
+    // range, otherwise it would be misidentified as immortal.
+    assert(refcnt < _Py_IMMORTAL_MINIMUM_SHARED_REFCNT);
     return refcnt;
 }
 
@@ -2779,8 +2796,8 @@ _Py_SetImmortalUntracked(PyObject *op)
     }
 #ifdef Py_GIL_DISABLED
     _Py_atomic_store_uintptr_relaxed(&op->ob_tid, _Py_UNOWNED_TID);
-    _Py_atomic_store_uint32_relaxed(&op->ob_ref_local, _Py_IMMORTAL_REFCNT_LOCAL);
-    _Py_atomic_store_ssize_relaxed(&op->ob_ref_shared, 0);
+    _Py_atomic_store_uint32_relaxed(&op->ob_ref_local, 0);
+    _Py_atomic_store_ssize_relaxed(&op->ob_ref_shared, _Py_REF_SHARED_IMMORTAL);
     _Py_atomic_or_uint8(&op->ob_gc_bits, _PyGC_BITS_DEFERRED);
 #elif SIZEOF_VOID_P > 4
     op->ob_flags = _Py_IMMORTAL_FLAGS;

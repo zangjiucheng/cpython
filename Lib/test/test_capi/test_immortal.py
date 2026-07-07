@@ -1,3 +1,4 @@
+import sys
 import unittest
 from test.support import import_helper
 
@@ -20,6 +21,22 @@ class TestUnstableCAPI(unittest.TestCase):
                 self.assertFalse(_testcapi.is_immortal(non_immortal))
 
         # CRASHES _testcapi.is_immortal(NULL)
+
+    def test_ordinary_object_not_immortal_after_many_increfs(self):
+        # gh-153202: the free-threaded immortal marker no longer lives in
+        # ob_ref_local (whose width is being reduced), so an ordinary object
+        # whose reference count is incremented well past 250 from a single
+        # thread must not be misreported as immortal.
+        obj = object()
+        # Build many references from this single thread. This drives the
+        # owning-thread incref fast path far above 250 references.
+        refs = [obj] * 300
+        try:
+            self.assertGreaterEqual(sys.getrefcount(obj), 250)
+            self.assertFalse(_testcapi.is_immortal(obj))
+        finally:
+            del refs
+        self.assertFalse(_testcapi.is_immortal(obj))
 
 
 class TestInternalCAPI(unittest.TestCase):
