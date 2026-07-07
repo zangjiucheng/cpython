@@ -1263,6 +1263,21 @@ class ImmortalityTest(unittest.TestCase):
     def test_stickiness(self, size):
         """Check that immortality is "sticky", so that
            once an object is immortal it remains so."""
+        # On the default build an object is permanently immortalized once its
+        # reference count crosses the immortality threshold (~2**31), so this
+        # test drives o1's refcount past that point (hence the 2**31 sizing)
+        # and checks that it stays immortal.
+        #
+        # The free-threaded build does NOT immortalize objects on
+        # reference-count overflow: the narrow (uint8_t) ob_ref_local spills
+        # its excess into ob_ref_shared instead, so there is no reference count
+        # reachable in practice that makes an ordinary object immortal here.
+        # (This 2**31 sizing used to coincide with the free-threaded
+        # local-overflow point only because that point was formerly ~2**32;
+        # that coincidence no longer exists.)
+        if support.Py_GIL_DISABLED:
+            self.skipTest("the free-threaded build does not immortalize "
+                          "objects on reference-count overflow")
         _testcapi = import_helper.import_module('_testcapi')
         if size < _2G:
             # Not enough memory to cause immortality on overflow

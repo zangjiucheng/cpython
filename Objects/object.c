@@ -489,7 +489,7 @@ _Py_ExplicitMergeRefcount(PyObject *op, Py_ssize_t extra)
 
     // gh-119999: Write to ob_ref_local and ob_tid before merging the refcount.
     Py_ssize_t local = (Py_ssize_t)op->ob_ref_local;
-    _Py_atomic_store_uint32_relaxed(&op->ob_ref_local, 0);
+    _Py_atomic_store_uint8_relaxed(&op->ob_ref_local, 0);
     _Py_atomic_store_uintptr_relaxed(&op->ob_tid, 0);
 
     Py_ssize_t refcnt;
@@ -2757,7 +2757,7 @@ new_reference(PyObject *op)
 #ifdef _Py_THREAD_SANITIZER
     _Py_atomic_store_uintptr_relaxed(&op->ob_tid, _Py_ThreadId());
     _Py_atomic_store_uint8_relaxed(&op->ob_gc_bits, 0);
-    _Py_atomic_store_uint32_relaxed(&op->ob_ref_local, 1);
+    _Py_atomic_store_uint8_relaxed(&op->ob_ref_local, 1);
     _Py_atomic_store_ssize_relaxed(&op->ob_ref_shared, 0);
 #else
     op->ob_tid = _Py_ThreadId();
@@ -2796,7 +2796,7 @@ _Py_SetImmortalUntracked(PyObject *op)
     }
 #ifdef Py_GIL_DISABLED
     _Py_atomic_store_uintptr_relaxed(&op->ob_tid, _Py_UNOWNED_TID);
-    _Py_atomic_store_uint32_relaxed(&op->ob_ref_local, 0);
+    _Py_atomic_store_uint8_relaxed(&op->ob_ref_local, 0);
     _Py_atomic_store_ssize_relaxed(&op->ob_ref_shared, _Py_REF_SHARED_IMMORTAL);
     _Py_atomic_or_uint8(&op->ob_gc_bits, _PyGC_BITS_DEFERRED);
 #elif SIZEOF_VOID_P > 4

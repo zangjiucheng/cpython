@@ -388,10 +388,12 @@ class PyObjectSizeTest(unittest.TestCase):
             #   uint16_t      ob_flags        (H)
             #   PyMutex       ob_mutex        (B)
             #   uint8_t       ob_gc_bits      (B)
-            #   uint32_t      ob_ref_local    (I)
+            #   uint8_t       ob_ref_local    (B)
             #   Py_ssize_t    ob_ref_shared   (n)
             #   PyTypeObject *ob_type         (P)
-            expected = struct.calcsize('PHBBInP')
+            # (ob_ref_shared's 8-byte alignment pads out ob_ref_local, so the
+            # total size is unchanged by that field's width.)
+            expected = struct.calcsize('PHBBBnP')
         else:
             # struct _object (default build): a pointer-sized refcount union
             # followed by the ob_type pointer.

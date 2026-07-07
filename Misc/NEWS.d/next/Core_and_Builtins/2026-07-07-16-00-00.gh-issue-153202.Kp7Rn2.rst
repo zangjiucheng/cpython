@@ -1,0 +1,6 @@
+Update the remaining consumers of the free-threaded object header's
+``ob_ref_local`` field to the new 8-bit (``uint8_t``) width and the immortal
+representation based on ``ob_ref_shared``. Reference-count increments made by
+an object's owning thread now spill the excess into the shared reference count
+once the narrow local count would overflow past ~256, rather than overflowing
+the field or immortalizing the object.

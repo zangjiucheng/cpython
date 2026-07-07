@@ -129,7 +129,7 @@ PyAPI_FUNC(Py_ssize_t) Py_REFCNT(PyObject *ob);
         if (shared_count >= _Py_IMMORTAL_MINIMUM_SHARED_REFCNT) {
             return _Py_IMMORTAL_INITIAL_REFCNT;
         }
-        uint32_t local = _Py_atomic_load_uint32_relaxed(&ob->ob_ref_local);
+        uint8_t local = _Py_atomic_load_uint8_relaxed(&ob->ob_ref_local);
         return _Py_STATIC_CAST(Py_ssize_t, local) + shared_count;
     #endif
     }
@@ -192,16 +192,16 @@ static inline void Py_SET_REFCNT(PyObject *ob, Py_ssize_t refcnt) {
     ob->ob_refcnt = refcnt;
 #endif
 #else
-    if (_Py_IsOwnedByCurrentThread(ob) && (size_t)refcnt <= (size_t)UINT32_MAX) {
+    if (_Py_IsOwnedByCurrentThread(ob) && (size_t)refcnt <= (size_t)UINT8_MAX) {
         // Set local refcount to desired refcount and shared refcount
         // to zero, but preserve the shared refcount flags.
-        ob->ob_ref_local = _Py_STATIC_CAST(uint32_t, refcnt);
+        ob->ob_ref_local = _Py_STATIC_CAST(uint8_t, refcnt);
         ob->ob_ref_shared &= _Py_REF_SHARED_FLAG_MASK;
     }
     else {
         // Set local refcount to zero and shared refcount to desired refcount.
-        // Mark the object as merged. A refcount that does not fit in the local
-        // count is also stored here rather than immortalizing the object.
+        // Mark the object as merged. A refcount that does not fit in the narrow
+        // local count is also stored here rather than immortalizing the object.
         ob->ob_tid = _Py_UNOWNED_TID;
         ob->ob_ref_local = 0;
         ob->ob_ref_shared = _Py_REF_SHARED(refcnt, _Py_REF_MERGED);
@@ -282,18 +282,19 @@ static inline Py_ALWAYS_INLINE void Py_INCREF(PyObject *op)
     // directly PyObject.ob_refcnt.
 #if defined(Py_GIL_DISABLED)
     if (_Py_IsOwnedByCurrentThread(op)) {
-        uint32_t local = _Py_atomic_load_uint32_relaxed(&op->ob_ref_local);
-        uint32_t new_local = local + 1;
-        if (new_local == 0) {
-            // ob_ref_local would overflow: spill the accumulated local count
-            // into the shared reference count rather than immortalizing the
-            // object (immortality must not depend on ob_ref_local's width).
+        uint8_t local = _Py_atomic_load_uint8_relaxed(&op->ob_ref_local);
+        if (local == UINT8_MAX) {
+            // ob_ref_local (a uint8_t) would overflow: spill the accumulated
+            // local count into the shared reference count rather than
+            // overflowing the field or immortalizing the object (immortality
+            // must not depend on ob_ref_local's width).
             _Py_atomic_add_ssize(&op->ob_ref_shared,
                 _Py_STATIC_CAST(Py_ssize_t, local) << _Py_REF_SHARED_SHIFT);
-            _Py_atomic_store_uint32_relaxed(&op->ob_ref_local, 1);
+            _Py_atomic_store_uint8_relaxed(&op->ob_ref_local, 1);
         }
         else {
-            _Py_atomic_store_uint32_relaxed(&op->ob_ref_local, new_local);
+            _Py_atomic_store_uint8_relaxed(&op->ob_ref_local,
+                _Py_STATIC_CAST(uint8_t, local + 1));
         }
     }
     else if (_Py_IsImmortal(op)) {
@@ -364,14 +365,14 @@ static inline void Py_DECREF(PyObject *op) {
 static inline void Py_DECREF(const char *filename, int lineno, PyObject *op)
 {
     if (_Py_IsOwnedByCurrentThread(op)) {
-        uint32_t local = _Py_atomic_load_uint32_relaxed(&op->ob_ref_local);
+        uint8_t local = _Py_atomic_load_uint8_relaxed(&op->ob_ref_local);
         if (local == 0) {
             _Py_NegativeRefcount(filename, lineno, op);
         }
         _Py_DECREF_STAT_INC();
         _Py_DECREF_DecRefTotal();
         local--;
-        _Py_atomic_store_uint32_relaxed(&op->ob_ref_local, local);
+        _Py_atomic_store_uint8_relaxed(&op->ob_ref_local, local);
         if (local == 0) {
             _Py_MergeZeroLocalRefcount(op);
         }
@@ -392,9 +393,9 @@ static inline void Py_DECREF(PyObject *op)
 {
     if (_Py_IsOwnedByCurrentThread(op)) {
         _Py_DECREF_STAT_INC();
-        uint32_t local = _Py_atomic_load_uint32_relaxed(&op->ob_ref_local);
+        uint8_t local = _Py_atomic_load_uint8_relaxed(&op->ob_ref_local);
         local--;
-        _Py_atomic_store_uint32_relaxed(&op->ob_ref_local, local);
+        _Py_atomic_store_uint8_relaxed(&op->ob_ref_local, local);
         if (local == 0) {
             _Py_MergeZeroLocalRefcount(op);
         }
