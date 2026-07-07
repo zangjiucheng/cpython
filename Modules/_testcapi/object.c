@@ -241,6 +241,102 @@ test_py_set_immortal(PyObject *self, PyObject *unused)
 }
 
 static PyObject *
+test_refcount_spill(PyObject *self, PyObject *unused)
+{
+#ifdef Py_GIL_DISABLED
+    // gh-153202: when a plain increment would overflow ob_ref_local (a uint32),
+    // the excess must spill into ob_ref_shared instead of immortalizing the
+    // object. Drive at least two overflow-spill cycles on a single object and
+    // confirm it stays mortal with a correct refcount.
+    if (PyType_Ready(&MyType) < 0) {
+        return NULL;
+    }
+
+    PyObject *op = PyObject_New(PyObject, &MyType);
+    if (op == NULL) {
+        return NULL;
+    }
+    // Ensure the shared reference count is merged on deallocation.
+    PyUnstable_EnableTryIncRef(op);
+
+    for (int cycle = 0; cycle < 2; cycle++) {
+        // Force ob_ref_local to its maximum so that the next single Py_INCREF
+        // overflows it and must spill. Re-establish thread ownership and clear
+        // the shared count each cycle: a spill resets ob_ref_local to 1, so the
+        // balancing Py_DECREF below merges the local count away and drops
+        // ownership. Clearing the shared count keeps Py_INCREF's and Py_DECREF's
+        // global refcount bookkeeping balanced across the cycle.
+        op->ob_tid = _Py_ThreadId();
+        op->ob_ref_local = UINT32_MAX;
+        op->ob_ref_shared &= _Py_REF_SHARED_FLAG_MASK;
+        Py_ssize_t before = Py_REFCNT(op);
+
+        Py_INCREF(op);  // must spill, not immortalize
+
+        if (PyUnstable_IsImmortal(op)) {
+            PyErr_SetString(PyExc_AssertionError,
+                            "object immortalized on ob_ref_local overflow");
+            return NULL;
+        }
+        if (Py_REFCNT(op) != before + 1) {
+            PyErr_SetString(PyExc_AssertionError,
+                            "refcount incorrect after overflow spill");
+            return NULL;
+        }
+        if (op->ob_ref_local != 1) {
+            PyErr_SetString(PyExc_AssertionError,
+                            "ob_ref_local not reset by overflow spill");
+            return NULL;
+        }
+
+        // Balance the Py_INCREF above so the global refcount total is unchanged
+        // by this cycle (the crafted counts are far too large to fully drain).
+        Py_DECREF(op);
+    }
+
+    // Confirm the object still deallocates correctly once its (now small)
+    // reference count is decremented back to zero. Re-establish ownership since
+    // the final spill cycle merged the local count away.
+    MyObject_dealloc_called = 0;
+    op->ob_tid = _Py_ThreadId();
+    op->ob_ref_local = 1;
+    op->ob_ref_shared &= _Py_REF_SHARED_FLAG_MASK;  // count = 0, keep flags
+    Py_DECREF(op);
+    if (MyObject_dealloc_called != 1) {
+        PyErr_SetString(PyExc_AssertionError,
+                        "object failed to deallocate after spill cycles");
+        return NULL;
+    }
+
+    // Finally, confirm that a reference count which has genuinely spilled into
+    // the shared count deallocates exactly once when drained to zero, using
+    // small counts. Build a real refcount of 5 with Py_INCREF (keeping the
+    // global total balanced), then relocate 3 of it into the shared count to
+    // mirror a post-spill layout.
+    MyObject_dealloc_called = 0;
+    PyObject *op2 = PyObject_New(PyObject, &MyType);
+    if (op2 == NULL) {
+        return NULL;
+    }
+    for (int i = 0; i < 4; i++) {
+        Py_INCREF(op2);
+    }
+    // Refcount is 5 and owned; move 3 references into the shared count.
+    op2->ob_ref_local = 2;
+    op2->ob_ref_shared = _Py_REF_SHARED(3, _Py_REF_MAYBE_WEAKREF);
+    for (int i = 0; i < 5; i++) {
+        Py_DECREF(op2);
+    }
+    if (MyObject_dealloc_called != 1) {
+        PyErr_SetString(PyExc_AssertionError,
+                        "spilled shared count did not deallocate at zero");
+        return NULL;
+    }
+#endif  // Py_GIL_DISABLED
+    Py_RETURN_NONE;
+}
+
+static PyObject *
 _test_incref(PyObject *ob)
 {
     return Py_NewRef(ob);
@@ -591,6 +687,7 @@ static PyMethodDef test_methods[] = {
     {"pyobject_is_unique_temporary_new_object", pyobject_is_unique_temporary_new_object, METH_NOARGS},
     {"test_py_try_inc_ref", test_py_try_inc_ref, METH_NOARGS},
     {"test_py_set_immortal", test_py_set_immortal, METH_NOARGS},
+    {"test_refcount_spill", test_refcount_spill, METH_NOARGS},
     {"test_xincref_doesnt_leak",test_xincref_doesnt_leak,        METH_NOARGS},
     {"test_incref_doesnt_leak", test_incref_doesnt_leak,         METH_NOARGS},
     {"test_xdecref_doesnt_leak",test_xdecref_doesnt_leak,        METH_NOARGS},

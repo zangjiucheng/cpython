@@ -225,6 +225,18 @@ class IsUniquelyReferencedTest(unittest.TestCase):
         self.assertFalse(_testcapi.is_uniquely_referenced(42))
         # CRASHES is_uniquely_referenced(NULL)
 
+@unittest.skipUnless(support.Py_GIL_DISABLED, 'requires free-threaded build')
+class RefcountSpillTest(unittest.TestCase):
+    """gh-153202: ob_ref_local overflow must spill into ob_ref_shared rather
+    than immortalizing the object."""
+    def test_refcount_spill(self):
+        # Drives at least two overflow-spill cycles on one object and confirms
+        # it stays mortal, keeps a correct refcount, and deallocates when its
+        # reference count (including the spilled shared count) reaches zero.
+        # The C helper raises AssertionError on any failure.
+        _testcapi.test_refcount_spill()
+
+
 class CAPITest(unittest.TestCase):
     def check_negative_refcount(self, code):
         # bpo-35059: Check that Py_DECREF() reports the correct filename
