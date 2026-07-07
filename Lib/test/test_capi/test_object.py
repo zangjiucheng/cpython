@@ -1,6 +1,7 @@
 import enum
 import os
 import pickle
+import struct
 import sys
 import textwrap
 import unittest
@@ -340,6 +341,50 @@ class CAPITest(unittest.TestCase):
         # test NULL object
         output = self.pyobject_dump(NULL)
         self.assertRegex(output, r'<object at .* is freed>')
+
+
+@support.cpython_only
+class PyObjectSizeTest(unittest.TestCase):
+    # sizeof(PyObject) is exported to out-of-process debuggers and remote
+    # profilers (PEP 768) through several surfaces that all derive from the
+    # same C expression:
+    #   * _Py_DebugOffsets.pyobject.size  (Include/internal/pycore_debug_offsets.h)
+    #   * _testinternalcapi.SIZEOF_PYOBJECT (Modules/_testinternalcapi.c)
+    #   * SIZEOF_PYOBJECT in Modules/_remote_debugging/_remote_debugging.h
+    # A width change to a PyObject header field (e.g. ob_ref_local /
+    # ob_ref_shared in the free-threaded build) therefore silently changes the
+    # exported size with no signal to tooling that cached the old layout.  Pin
+    # the value so such a change trips this test and forces a conscious update
+    # plus a decision about bumping _Py_DebugOffsets.version.
+
+    def test_sizeof_pyobject_matches_base_object(self):
+        # The exported diagnostic must track the real object layout.  The base
+        # ``object`` type stores nothing beyond a PyObject, so its basic size
+        # is exactly sizeof(PyObject); if the two ever disagree, the exported
+        # debug-offsets data has drifted from reality.
+        self.assertEqual(_testinternalcapi.SIZEOF_PYOBJECT,
+                         object.__basicsize__)
+
+    def test_sizeof_pyobject_pinned(self):
+        # Independently recompute sizeof(PyObject) from the documented header
+        # layout (Include/object.h).  Changing a field width forces this
+        # expectation to be updated in lockstep, which is the point.
+        pointer = struct.calcsize('P')
+        if support.Py_GIL_DISABLED:
+            # struct _object (free-threaded build):
+            #   uintptr_t     ob_tid          (P)
+            #   uint16_t      ob_flags        (H)
+            #   PyMutex       ob_mutex        (B)
+            #   uint8_t       ob_gc_bits      (B)
+            #   uint32_t      ob_ref_local    (I)
+            #   Py_ssize_t    ob_ref_shared   (n)
+            #   PyTypeObject *ob_type         (P)
+            expected = struct.calcsize('PHBBInP')
+        else:
+            # struct _object (default build): a pointer-sized refcount union
+            # followed by the ob_type pointer.
+            expected = 2 * pointer
+        self.assertEqual(_testinternalcapi.SIZEOF_PYOBJECT, expected)
 
 
 if __name__ == "__main__":
