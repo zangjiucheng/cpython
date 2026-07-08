@@ -445,6 +445,21 @@ static_assert(_Py_IMMORTAL_MINIMUM_SHARED_REFCNT > 0
               "immortal shared refcount must fit in the ob_ref_shared count range");
 static_assert(_Py_REF_SHARED_IMMORTAL > 0,
               "immortal ob_ref_shared marker must be a positive Py_ssize_t");
+// gh-153202: _Py_REF_DEFERRED (pycore_object.h) is added, alone, to the
+// shared count of every deferred-refcounted object (module dicts, functions,
+// code objects, ...) the instant deferred refcounting is enabled -- before
+// that object accrues a single real reference. If the immortal threshold
+// were ever at or below _Py_REF_DEFERRED, every such object would be
+// misreported as immortal from birth, corrupting GC/refcount handling for
+// it (this exact collision shipped once and crashed every _bootstrap_python
+// invocation via a lost GC-tracked bit on interp->builtins; see
+// bug-fix/gh-153202/fix-summary.md). Require a wide margin above
+// _Py_REF_DEFERRED, not just strict inequality, since a deferred object's
+// count legitimately fluctuates above that baseline as real references
+// come and go.
+static_assert(_Py_IMMORTAL_MINIMUM_SHARED_REFCNT
+              > _Py_REF_DEFERRED + (_Py_REF_SHARED_COUNT_MAX / 8),
+              "immortal threshold must stay well clear of _Py_REF_DEFERRED");
 #endif
 
 void

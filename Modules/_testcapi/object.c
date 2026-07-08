@@ -244,7 +244,7 @@ static PyObject *
 test_refcount_spill(PyObject *self, PyObject *unused)
 {
 #ifdef Py_GIL_DISABLED
-    // gh-153202: when a plain increment would overflow ob_ref_local (a uint32),
+    // gh-153202: when a plain increment would overflow ob_ref_local (a uint8_t),
     // the excess must spill into ob_ref_shared instead of immortalizing the
     // object. Drive at least two overflow-spill cycles on a single object and
     // confirm it stays mortal with a correct refcount.
@@ -267,7 +267,7 @@ test_refcount_spill(PyObject *self, PyObject *unused)
         // ownership. Clearing the shared count keeps Py_INCREF's and Py_DECREF's
         // global refcount bookkeeping balanced across the cycle.
         op->ob_tid = _Py_ThreadId();
-        op->ob_ref_local = UINT32_MAX;
+        op->ob_ref_local = UINT8_MAX;
         op->ob_ref_shared &= _Py_REF_SHARED_FLAG_MASK;
         Py_ssize_t before = Py_REFCNT(op);
 

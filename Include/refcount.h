@@ -99,9 +99,23 @@ check by comparing the reference count field to the minimum immortality refcount
    // _Py_IMMORTAL_MINIMUM_SHARED_REFCNT. Newly immortalized objects are given
    // _Py_IMMORTAL_INITIAL_SHARED_REFCNT (higher than the minimum), so that a
    // huge number of increfs/decrefs can occur before immortality could be lost.
-#  define _Py_IMMORTAL_MINIMUM_SHARED_REFCNT  (_Py_REF_SHARED_COUNT_MAX / 2)
+   //
+   // The immortal region is placed in the top quarter of the count range
+   // rather than at its midpoint: pycore_object.h's _Py_REF_DEFERRED (the
+   // baseline every deferred-refcounted object's shared count is initialized
+   // to) sits at PY_SSIZE_T_MAX / 8, which is almost exactly the midpoint of
+   // this range. A midpoint immortal threshold made every freshly
+   // deferred-refcounted object (module dicts, functions, code objects, ...)
+   // immortal from the moment deferred refcounting was enabled, with zero
+   // real references (gh-153202 fix-summary, "已知限制"). Starting the
+   // immortal region a full COUNT_MAX/4 (~2**59) above _Py_REF_DEFERRED
+   // leaves headroom no realistic number of increfs/decrefs could cross; see
+   // the static_assert against _Py_REF_DEFERRED in Objects/object.c.
+#  define _Py_IMMORTAL_MINIMUM_SHARED_REFCNT \
+              (_Py_REF_SHARED_COUNT_MAX - (_Py_REF_SHARED_COUNT_MAX / 4))
 #  define _Py_IMMORTAL_INITIAL_SHARED_REFCNT \
-              (_Py_IMMORTAL_MINIMUM_SHARED_REFCNT + (_Py_REF_SHARED_COUNT_MAX / 4))
+              (_Py_IMMORTAL_MINIMUM_SHARED_REFCNT + \
+               ((_Py_REF_SHARED_COUNT_MAX - _Py_IMMORTAL_MINIMUM_SHARED_REFCNT) / 2))
 
    // The ob_ref_shared value used to represent a freshly immortal object (both
    // statically allocated and runtime-promoted). The two flag bits are clear.
