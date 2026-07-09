@@ -523,8 +523,11 @@ _PyObject_InitVar(PyVarObject *op, PyTypeObject *typeobj, Py_ssize_t size)
  */
 static inline int
 _Py_TryIncrefFast(PyObject *op) {
+    // gh-153202: see refcount.h's Py_INCREF -- load ob_ref_local
+    // unconditionally, in parallel with the ownership check, instead of
+    // gating it behind it.
+    uint8_t local = _Py_atomic_load_uint8_relaxed(&op->ob_ref_local);
     if (_Py_IsOwnedByCurrentThread(op)) {
-        uint8_t local = _Py_atomic_load_uint8_relaxed(&op->ob_ref_local);
         if (local == UINT8_MAX) {
             // ob_ref_local (a uint8_t) would overflow: spill the accumulated
             // local count into the shared reference count rather than

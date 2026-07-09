@@ -113,9 +113,12 @@
 #define Py_DECREF(arg) \
     do { \
         PyObject *op = _PyObject_CAST(arg); \
+        /* gh-153202: see refcount.h's Py_DECREF -- load ob_ref_local */ \
+        /* unconditionally, in parallel with the ownership check, */ \
+        /* instead of gating it behind it. */ \
+        uint8_t local = _Py_atomic_load_uint8_relaxed(&op->ob_ref_local); \
         if (_Py_IsOwnedByCurrentThread(op)) { \
             _Py_DECREF_STAT_INC(); \
-            uint8_t local = _Py_atomic_load_uint8_relaxed(&op->ob_ref_local); \
             local--; \
             _Py_atomic_store_uint8_relaxed(&op->ob_ref_local, local); \
             if (local == 0) { \

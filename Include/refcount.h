@@ -295,8 +295,14 @@ static inline Py_ALWAYS_INLINE void Py_INCREF(PyObject *op)
     // Non-limited C API and limited C API for Python 3.9 and older access
     // directly PyObject.ob_refcnt.
 #if defined(Py_GIL_DISABLED)
+    // gh-153202: load the local count unconditionally, in parallel with the
+    // ownership check below -- ob_ref_local and ob_tid are independent
+    // fields, so gating this load behind the ownership branch would
+    // serialize what can otherwise be two independent loads into one
+    // dependency chain, in every Py_INCREF call in the interpreter (see
+    // fix-summary.md 9.6 for the pyperformance evidence).
+    uint8_t local = _Py_atomic_load_uint8_relaxed(&op->ob_ref_local);
     if (_Py_IsOwnedByCurrentThread(op)) {
-        uint8_t local = _Py_atomic_load_uint8_relaxed(&op->ob_ref_local);
         if (local == UINT8_MAX) {
             // ob_ref_local (a uint8_t) would overflow: spill the accumulated
             // local count into the shared reference count rather than
@@ -378,8 +384,10 @@ static inline void Py_DECREF(PyObject *op) {
 #elif defined(Py_GIL_DISABLED) && defined(Py_REF_DEBUG)
 static inline void Py_DECREF(const char *filename, int lineno, PyObject *op)
 {
+    // gh-153202: see Py_INCREF -- load ob_ref_local unconditionally, in
+    // parallel with the ownership check, instead of gating it behind it.
+    uint8_t local = _Py_atomic_load_uint8_relaxed(&op->ob_ref_local);
     if (_Py_IsOwnedByCurrentThread(op)) {
-        uint8_t local = _Py_atomic_load_uint8_relaxed(&op->ob_ref_local);
         if (local == 0) {
             _Py_NegativeRefcount(filename, lineno, op);
         }
@@ -405,9 +413,11 @@ static inline void Py_DECREF(const char *filename, int lineno, PyObject *op)
 #elif defined(Py_GIL_DISABLED)
 static inline void Py_DECREF(PyObject *op)
 {
+    // gh-153202: see Py_INCREF -- load ob_ref_local unconditionally, in
+    // parallel with the ownership check, instead of gating it behind it.
+    uint8_t local = _Py_atomic_load_uint8_relaxed(&op->ob_ref_local);
     if (_Py_IsOwnedByCurrentThread(op)) {
         _Py_DECREF_STAT_INC();
-        uint8_t local = _Py_atomic_load_uint8_relaxed(&op->ob_ref_local);
         local--;
         _Py_atomic_store_uint8_relaxed(&op->ob_ref_local, local);
         if (local == 0) {
