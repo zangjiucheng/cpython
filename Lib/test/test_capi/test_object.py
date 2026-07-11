@@ -391,9 +391,18 @@ class PyObjectSizeTest(unittest.TestCase):
             #   uint8_t       ob_ref_local    (B)
             #   Py_ssize_t    ob_ref_shared   (n)
             #   PyTypeObject *ob_type         (P)
-            # (ob_ref_shared's 8-byte alignment pads out ob_ref_local, so the
-            # total size is unchanged by that field's width.)
-            expected = struct.calcsize('PHBBBnP')
+            #   uint32_t      gc_scratch      (I)
+            # (ob_ref_shared's 8-byte alignment pads out ob_ref_local, so that
+            # field's width alone would not change the total size -- but
+            # gc_scratch is a new field (gh-153202 experiment, replacing a
+            # _Py_hashtable_t GC side table), so it genuinely adds 8 bytes:
+            # 4 bytes for itself plus 4 bytes of trailing struct-alignment
+            # padding after it. Unlike a real C compiler, struct.calcsize()
+            # does not add that trailing padding automatically (it aligns
+            # each field but doesn't round the total up to the struct's
+            # largest member alignment), so it must be spelled out with an
+            # explicit 'xxxx'.
+            expected = struct.calcsize('PHBBBnPIxxxx')
         else:
             # struct _object (default build): a pointer-sized refcount union
             # followed by the ob_type pointer.

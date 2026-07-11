@@ -164,6 +164,17 @@ struct _object {
     uint8_t ob_ref_local;       // local reference count (only a few bits used)
     Py_ssize_t ob_ref_shared;   // shared (atomic) reference count
     PyTypeObject *ob_type;
+    // gh-153202 experiment: scratch space for the cyclic GC's incoming-
+    // reference count during stop-the-world collection (see
+    // handle_resurrected_objects() in Python/gc_free_threading.c), replacing
+    // a _Py_hashtable_t side table keyed by object. Meaningless outside of a
+    // collection pass; every object that reaches it is unconditionally
+    // written before being read, so it needs no initialization at object
+    // creation. NOTE: adds 8 bytes to sizeof(PyObject) (32 -> 40) because
+    // ob_ref_shared has not also been narrowed to uint32_t here -- this is a
+    // deliberate, temporary trade-off to isolate whether the side table was
+    // the dominant cost, not a proposed final layout.
+    uint32_t gc_scratch;
 };
 #endif // !defined(_Py_OPAQUE_PYOBJECT)
 

@@ -141,15 +141,17 @@ and, during garbage collection, differentiate reachable vs. unreachable objects.
                   |                  ob_ref_shared                | |
                   +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+ |
                   |                    *ob_type                   | |
+                  +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+ |
+                  |    gc_scratch     |         pad               | |
                   +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+ /
                   |                      ...                      |
 ```
 
-Note that not all fields are to scale. `pad` is two bytes, and `ob_mutex`,
-`ob_gc_bits`, and `ob_ref_local` are each one byte (only a few bits of
-`ob_ref_local` are ever used). The other fields, `ob_tid`, `ob_ref_shared`,
-and `ob_type`, are all pointer-sized (that is, eight bytes on a 64-bit
-platform).
+Note that not all fields are to scale. `pad` is two bytes in the first row
+and four bytes in the last, and `ob_mutex`, `ob_gc_bits`, and `ob_ref_local`
+are each one byte (only a few bits of `ob_ref_local` are ever used).
+`gc_scratch` is four bytes. The other fields, `ob_tid`, `ob_ref_shared`, and
+`ob_type`, are all pointer-sized (that is, eight bytes on a 64-bit platform).
 
 
 The garbage collector also temporarily repurposes the `ob_tid` (thread ID)
@@ -161,11 +163,17 @@ value.  Code should not rely on `ob_tid` being stable across operations that
 may trigger garbage collection.
 
 To determine which unreachable objects are still reachable from outside the
-unreachable set, the collector counts each object's incoming references in a
-temporary side table of `Py_ssize_t` counters keyed by object.  Earlier
-versions repurposed the narrow `ob_ref_local` field for this scratch count,
-but that field is no longer wide enough to hold an arbitrary count, so the
-side table is used instead.
+unreachable set, the collector counts each object's incoming references in
+the `gc_scratch` field (gh-153202 experiment). Earlier versions of this
+narrowing repurposed `ob_ref_local` for this scratch count directly, but that
+field is too narrow (a single cycle can have well over 255 cross-references
+to one object); a later version used a temporary `_Py_hashtable_t` side table
+of `Py_ssize_t` counters keyed by object instead, avoiding any dependency on
+object field widths but adding hashtable-operation overhead to every
+collection pass with unreachable objects. `gc_scratch` trades some of that
+width-independence (it is `uint32_t`, not `Py_ssize_t`) to avoid the
+hashtable, at the cost of 8 bytes of header size relative to a build that has
+not also narrowed `ob_ref_shared`.
 
 
 C APIs

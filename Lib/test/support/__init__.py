@@ -1024,7 +1024,18 @@ def expected_failure_if_gil_disabled():
     return lambda test_case: test_case
 
 if Py_GIL_DISABLED:
-    _header = 'PHBBInP'
+    # gh-153202 experiment: struct _object gained a trailing gc_scratch
+    # field (uint32_t, replacing a GC side table), adding 8 bytes total (4
+    # for the field itself, 4 more trailing struct-alignment padding after
+    # it that struct.calcsize() doesn't add automatically -- see the longer
+    # explanation in test_capi/test_object.py's PyObjectSizeTest).
+    #
+    # Note 'I' rather than 'B' for the byte right before the ref counts:
+    # that's not ob_ref_local (a uint8_t) -- it just happens that any 4-byte,
+    # 4-byte-aligned filler there produces the same total+alignment as the
+    # real header, so it was never updated when ob_ref_local was narrowed
+    # from uint32_t (hence the leftover 'I') down to uint8_t.
+    _header = 'PHBBInPIxxxx'
 else:
     _header = 'nP'
 _align = '0n'
