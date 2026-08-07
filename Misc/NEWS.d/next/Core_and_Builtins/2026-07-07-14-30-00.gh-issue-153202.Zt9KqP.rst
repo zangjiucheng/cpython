@@ -1,0 +1,4 @@
+Shrink the ``ob_ref_local`` reference-count field in the free-threaded build's
+object header from 32 bits to 8 bits. Only a few bits of the per-object local
+reference count are ever needed, so narrowing the field reduces the object
+header's size requirements while leaving room for other header fields.

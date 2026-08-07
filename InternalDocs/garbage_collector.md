@@ -145,19 +145,27 @@ and, during garbage collection, differentiate reachable vs. unreachable objects.
                   |                      ...                      |
 ```
 
-Note that not all fields are to scale. `pad` is two bytes, `ob_mutex` and
-`ob_gc_bits` are each one byte, and `ob_ref_local` is four bytes. The
-other fields, `ob_tid`, `ob_ref_shared`, and `ob_type`, are all
-pointer-sized (that is, eight bytes on a 64-bit platform).
+Note that not all fields are to scale. `pad` is two bytes, and `ob_mutex`,
+`ob_gc_bits`, and `ob_ref_local` are each one byte (only a few bits of
+`ob_ref_local` are ever used). The other fields, `ob_tid`, `ob_ref_shared`,
+and `ob_type`, are all pointer-sized (that is, eight bytes on a 64-bit
+platform).
 
 
 The garbage collector also temporarily repurposes the `ob_tid` (thread ID)
-and `ob_ref_local` (local reference count) fields for other purposes during
-collections.  The `ob_tid` field is later restored from the containing
-mimalloc segment data structure.  In some cases, such as when the original
-allocating thread exits, this can result in a different `ob_tid` value.
-Code should not rely on `ob_tid` being stable across operations that may
-trigger garbage collection.
+field during collections, using it as a linked-list pointer for the worklist
+of objects being processed.  The `ob_tid` field is later restored from the
+containing mimalloc segment data structure.  In some cases, such as when the
+original allocating thread exits, this can result in a different `ob_tid`
+value.  Code should not rely on `ob_tid` being stable across operations that
+may trigger garbage collection.
+
+To determine which unreachable objects are still reachable from outside the
+unreachable set, the collector counts each object's incoming references in a
+temporary side table of `Py_ssize_t` counters keyed by object.  Earlier
+versions repurposed the narrow `ob_ref_local` field for this scratch count,
+but that field is no longer wide enough to hold an arbitrary count, so the
+side table is used instead.
 
 
 C APIs

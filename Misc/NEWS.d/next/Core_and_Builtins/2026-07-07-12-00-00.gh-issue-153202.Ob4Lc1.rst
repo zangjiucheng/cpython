@@ -1,0 +1,6 @@
+During cyclic garbage collection, the free-threaded build now counts each
+unreachable object's incoming references in a side table of ``Py_ssize_t``
+counters instead of temporarily repurposing the object's ``ob_ref_local``
+field. This removes the previous dependency on that field being wide enough to
+hold an arbitrary count, so a reference cycle with more than 255
+cross-references to a single object is now collected correctly.
