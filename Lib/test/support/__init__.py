@@ -1046,7 +1046,17 @@ def expected_failure_if_gil_disabled():
     return lambda test_case: test_case
 
 if Py_GIL_DISABLED:
-    _header = 'PHBBInP'
+    # gh-153202 full proposal: struct _object gained a gc_scratch field
+    # (uint32_t, replacing a GC side table) at no net size cost, by also
+    # narrowing ob_ref_shared from Py_ssize_t to int32_t (signed -- see
+    # Python/brc.c) and reordering fields so ob_type comes last -- see the
+    # longer explanation in test_capi/test_object.py's PyObjectSizeTest.
+    # This mirrors the real field types exactly, so unlike the earlier
+    # gc_scratch-only layout it needs no trailing padding: P(ob_tid)
+    # H(ob_flags) B(ob_mutex) B(ob_gc_bits) B(ob_ref_local) i(ob_ref_shared)
+    # I(gc_scratch) P(ob_type) already ends on the struct's own 8-byte
+    # alignment boundary.
+    _header = 'PHBBBiIP'
 else:
     _header = 'nP'
 _align = '0n'

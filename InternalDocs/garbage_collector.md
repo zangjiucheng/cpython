@@ -136,28 +136,52 @@ and, during garbage collection, differentiate reachable vs. unreachable objects.
     object -----> +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+ \
                   |                     ob_tid                    | |
                   +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+ |
-                  | pad | ob_mutex | ob_gc_bits |  ob_ref_local   | |
-                  +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+ | PyObject_HEAD
-                  |                  ob_ref_shared                | |
+                  | pad | ob_mutex | ob_gc_bits |  ob_ref_local   | | PyObject_HEAD
+                  +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+ |
+                  |      ob_ref_shared     |      gc_scratch      | |
                   +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+ |
                   |                    *ob_type                   | |
                   +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+ /
                   |                      ...                      |
 ```
 
-Note that not all fields are to scale. `pad` is two bytes, `ob_mutex` and
-`ob_gc_bits` are each one byte, and `ob_ref_local` is four bytes. The
-other fields, `ob_tid`, `ob_ref_shared`, and `ob_type`, are all
-pointer-sized (that is, eight bytes on a 64-bit platform).
+Note that not all fields are to scale. `pad` is two bytes, and `ob_mutex`,
+`ob_gc_bits`, and `ob_ref_local` are each one byte (only a few bits of
+`ob_ref_local` are ever used). `ob_ref_shared` and `gc_scratch` are each four
+bytes (`ob_ref_shared` is a signed `int32_t`, not pointer-sized -- see
+below). `ob_tid` and `ob_type` are pointer-sized (that is, eight bytes on a
+64-bit platform).
 
 
 The garbage collector also temporarily repurposes the `ob_tid` (thread ID)
-and `ob_ref_local` (local reference count) fields for other purposes during
-collections.  The `ob_tid` field is later restored from the containing
-mimalloc segment data structure.  In some cases, such as when the original
-allocating thread exits, this can result in a different `ob_tid` value.
-Code should not rely on `ob_tid` being stable across operations that may
-trigger garbage collection.
+field during collections, using it as a linked-list pointer for the worklist
+of objects being processed.  The `ob_tid` field is later restored from the
+containing mimalloc segment data structure.  In some cases, such as when the
+original allocating thread exits, this can result in a different `ob_tid`
+value.  Code should not rely on `ob_tid` being stable across operations that
+may trigger garbage collection.
+
+To determine which unreachable objects are still reachable from outside the
+unreachable set, the collector counts each object's incoming references in
+the `gc_scratch` field (gh-153202 experiment). Earlier versions of this
+narrowing repurposed `ob_ref_local` for this scratch count directly, but that
+field is too narrow (a single cycle can have well over 255 cross-references
+to one object); a later version used a temporary `_Py_hashtable_t` side table
+of `Py_ssize_t` counters keyed by object instead, avoiding any dependency on
+object field widths but adding hashtable-operation overhead to every
+collection pass with unreachable objects. `gc_scratch` trades some of that
+width-independence (it is `uint32_t`, not `Py_ssize_t`) to avoid the
+hashtable.
+
+This full-proposal variant also narrows `ob_ref_shared` itself from
+`Py_ssize_t` down to a signed `int32_t` (signed, not the `uint32_t` first
+suggested, because `Python/brc.c`'s biased reference counting scheme
+requires `ob_ref_shared` to be able to go transiently negative), and
+reorders the struct so `ob_type` comes after both `ob_ref_shared` and
+`gc_scratch` instead of before. That combination makes `gc_scratch` free:
+the two adjacent four-byte fields fill exactly the alignment gap that
+`ob_ref_shared` alone used to leave before the eight-byte-aligned `ob_type`,
+so `sizeof(PyObject)` is unchanged from before `gc_scratch` was added.
 
 
 C APIs

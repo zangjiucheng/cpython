@@ -113,20 +113,23 @@
 #define Py_DECREF(arg) \
     do { \
         PyObject *op = _PyObject_CAST(arg); \
-        uint32_t local = _Py_atomic_load_uint32_relaxed(&op->ob_ref_local); \
-        if (local == _Py_IMMORTAL_REFCNT_LOCAL) { \
-            _Py_DECREF_IMMORTAL_STAT_INC(); \
-            break; \
-        } \
-        _Py_DECREF_STAT_INC(); \
+        /* gh-153202: see refcount.h's Py_DECREF -- load ob_ref_local */ \
+        /* unconditionally, in parallel with the ownership check, */ \
+        /* instead of gating it behind it. */ \
+        uint8_t local = _Py_atomic_load_uint8_relaxed(&op->ob_ref_local); \
         if (_Py_IsOwnedByCurrentThread(op)) { \
+            _Py_DECREF_STAT_INC(); \
             local--; \
-            _Py_atomic_store_uint32_relaxed(&op->ob_ref_local, local); \
+            _Py_atomic_store_uint8_relaxed(&op->ob_ref_local, local); \
             if (local == 0) { \
                 _Py_MergeZeroLocalRefcount(op); \
             } \
         } \
+        else if (_Py_IsImmortal(op)) { \
+            _Py_DECREF_IMMORTAL_STAT_INC(); \
+        } \
         else { \
+            _Py_DECREF_STAT_INC(); \
             _Py_DecRefShared(op); \
         } \
     } while (0)

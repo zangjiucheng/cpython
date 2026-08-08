@@ -1,0 +1,9 @@
+In the free-threaded build, shrink the object header's ``ob_ref_local``
+field from 32 bits to 8 bits and ``ob_ref_shared`` from a pointer-sized
+field to 32 bits, adding a ``gc_scratch`` field used by the cyclic garbage
+collector to count each unreachable object's incoming references during
+collection (replacing a hash table previously used for the same purpose)
+with no net change to the object header's size. Reference-count
+increments made by an object's owning thread spill the excess into the
+shared reference count once the narrow local count would overflow past
+~256, rather than overflowing the field or immortalizing the object.

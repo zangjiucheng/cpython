@@ -14610,7 +14610,7 @@ can_immortalize_safely(PyObject *s)
     if (_Py_IsOwnedByCurrentThread(s) || _Py_IsImmortal(s)) {
         return true;
     }
-    Py_ssize_t shared = _Py_atomic_load_ssize(&s->ob_ref_shared);
+    int32_t shared = _Py_atomic_load_int32(&s->ob_ref_shared);
     return _Py_REF_IS_MERGED(shared);
 }
 #endif
