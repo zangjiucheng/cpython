@@ -68,13 +68,6 @@ check by comparing the reference count field to the minimum immortality refcount
 #define _Py_STATIC_IMMORTAL_MINIMUM_REFCNT ((Py_ssize_t)(6L << 28))
 #endif
 
-// Py_GIL_DISABLED builds indicate immortal objects using `ob_ref_local`, which is
-// always 32-bits.
-#ifdef Py_GIL_DISABLED
-#define _Py_IMMORTAL_REFCNT_LOCAL UINT32_MAX
-#endif
-
-
 #ifdef Py_GIL_DISABLED
    // The shared reference count uses the two least-significant bits to store
    // flags. The remaining bits are used to store the reference count.
@@ -90,6 +83,44 @@ check by comparing the reference count field to the minimum immortality refcount
    // Create a shared field from a refcnt and desired flags
 #  define _Py_REF_SHARED(refcnt, flags) \
               (((refcnt) << _Py_REF_SHARED_SHIFT) + (flags))
+
+   // The maximum value representable in the *count* portion of ob_ref_shared
+   // (the bits above the two flags). ob_ref_shared is a signed Py_ssize_t, so
+   // the count occupies the remaining high bits.
+#  define _Py_REF_SHARED_COUNT_MAX \
+              (_Py_STATIC_CAST(Py_ssize_t, PY_SSIZE_T_MAX >> _Py_REF_SHARED_SHIFT))
+
+   // Immortal objects are marked by a reserved, very large value in the count
+   // portion of ob_ref_shared, mirroring the saturation/immortality scheme the
+   // default (with-GIL) build uses for ob_refcnt. Keeping the immortal marker
+   // on ob_ref_shared makes immortality independent of ob_ref_local's width.
+   //
+   // An object is immortal when its shared count is at least
+   // _Py_IMMORTAL_MINIMUM_SHARED_REFCNT. Newly immortalized objects are given
+   // _Py_IMMORTAL_INITIAL_SHARED_REFCNT (higher than the minimum), so that a
+   // huge number of increfs/decrefs can occur before immortality could be lost.
+   //
+   // The immortal region is placed in the top quarter of the count range
+   // rather than at its midpoint: pycore_object.h's _Py_REF_DEFERRED (the
+   // baseline every deferred-refcounted object's shared count is initialized
+   // to) sits at PY_SSIZE_T_MAX / 8, which is almost exactly the midpoint of
+   // this range. A midpoint immortal threshold made every freshly
+   // deferred-refcounted object (module dicts, functions, code objects, ...)
+   // immortal from the moment deferred refcounting was enabled, with zero
+   // real references (gh-153202 fix-summary, "已知限制"). Starting the
+   // immortal region a full COUNT_MAX/4 (~2**59) above _Py_REF_DEFERRED
+   // leaves headroom no realistic number of increfs/decrefs could cross; see
+   // the static_assert against _Py_REF_DEFERRED in Objects/object.c.
+#  define _Py_IMMORTAL_MINIMUM_SHARED_REFCNT \
+              (_Py_REF_SHARED_COUNT_MAX - (_Py_REF_SHARED_COUNT_MAX / 4))
+#  define _Py_IMMORTAL_INITIAL_SHARED_REFCNT \
+              (_Py_IMMORTAL_MINIMUM_SHARED_REFCNT + \
+               ((_Py_REF_SHARED_COUNT_MAX - _Py_IMMORTAL_MINIMUM_SHARED_REFCNT) / 2))
+
+   // The ob_ref_shared value used to represent a freshly immortal object (both
+   // statically allocated and runtime-promoted). The two flag bits are clear.
+#  define _Py_REF_SHARED_IMMORTAL \
+              _Py_REF_SHARED(_Py_IMMORTAL_INITIAL_SHARED_REFCNT, _Py_REF_SHARED_INIT)
 #endif  // Py_GIL_DISABLED
 #endif  // _Py_OPAQUE_PYOBJECT
 
@@ -106,13 +137,14 @@ PyAPI_FUNC(Py_ssize_t) Py_REFCNT(PyObject *ob);
     #if !defined(Py_GIL_DISABLED)
         return ob->ob_refcnt;
     #else
-        uint32_t local = _Py_atomic_load_uint32_relaxed(&ob->ob_ref_local);
-        if (local == _Py_IMMORTAL_REFCNT_LOCAL) {
+        Py_ssize_t shared = _Py_atomic_load_ssize_relaxed(&ob->ob_ref_shared);
+        Py_ssize_t shared_count =
+            Py_ARITHMETIC_RIGHT_SHIFT(Py_ssize_t, shared, _Py_REF_SHARED_SHIFT);
+        if (shared_count >= _Py_IMMORTAL_MINIMUM_SHARED_REFCNT) {
             return _Py_IMMORTAL_INITIAL_REFCNT;
         }
-        Py_ssize_t shared = _Py_atomic_load_ssize_relaxed(&ob->ob_ref_shared);
-        return _Py_STATIC_CAST(Py_ssize_t, local) +
-               Py_ARITHMETIC_RIGHT_SHIFT(Py_ssize_t, shared, _Py_REF_SHARED_SHIFT);
+        uint8_t local = _Py_atomic_load_uint8_relaxed(&ob->ob_ref_local);
+        return _Py_STATIC_CAST(Py_ssize_t, local) + shared_count;
     #endif
     }
     #if !defined(Py_LIMITED_API) || Py_LIMITED_API+0 < 0x030b0000
@@ -126,8 +158,9 @@ PyAPI_FUNC(Py_ssize_t) Py_REFCNT(PyObject *ob);
 static inline Py_ALWAYS_INLINE int _Py_IsImmortal(PyObject *op)
 {
 #if defined(Py_GIL_DISABLED)
-    return (_Py_atomic_load_uint32_relaxed(&op->ob_ref_local) ==
-            _Py_IMMORTAL_REFCNT_LOCAL);
+    Py_ssize_t shared = _Py_atomic_load_ssize_relaxed(&op->ob_ref_shared);
+    return Py_ARITHMETIC_RIGHT_SHIFT(Py_ssize_t, shared, _Py_REF_SHARED_SHIFT)
+           >= _Py_IMMORTAL_MINIMUM_SHARED_REFCNT;
 #elif SIZEOF_VOID_P > 4
     return _Py_CAST(int32_t, op->ob_refcnt) < 0;
 #else
@@ -173,23 +206,16 @@ static inline void Py_SET_REFCNT(PyObject *ob, Py_ssize_t refcnt) {
     ob->ob_refcnt = refcnt;
 #endif
 #else
-    if (_Py_IsOwnedByCurrentThread(ob)) {
-        if ((size_t)refcnt > (size_t)UINT32_MAX) {
-            // On overflow, make the object immortal
-            ob->ob_tid = _Py_UNOWNED_TID;
-            ob->ob_ref_local = _Py_IMMORTAL_REFCNT_LOCAL;
-            ob->ob_ref_shared = 0;
-        }
-        else {
-            // Set local refcount to desired refcount and shared refcount
-            // to zero, but preserve the shared refcount flags.
-            ob->ob_ref_local = _Py_STATIC_CAST(uint32_t, refcnt);
-            ob->ob_ref_shared &= _Py_REF_SHARED_FLAG_MASK;
-        }
+    if (_Py_IsOwnedByCurrentThread(ob) && (size_t)refcnt <= (size_t)UINT8_MAX) {
+        // Set local refcount to desired refcount and shared refcount
+        // to zero, but preserve the shared refcount flags.
+        ob->ob_ref_local = _Py_STATIC_CAST(uint8_t, refcnt);
+        ob->ob_ref_shared &= _Py_REF_SHARED_FLAG_MASK;
     }
     else {
         // Set local refcount to zero and shared refcount to desired refcount.
-        // Mark the object as merged.
+        // Mark the object as merged. A refcount that does not fit in the narrow
+        // local count is also stored here rather than immortalizing the object.
         ob->ob_tid = _Py_UNOWNED_TID;
         ob->ob_ref_local = 0;
         ob->ob_ref_shared = _Py_REF_SHARED(refcnt, _Py_REF_MERGED);
@@ -269,15 +295,31 @@ static inline Py_ALWAYS_INLINE void Py_INCREF(PyObject *op)
     // Non-limited C API and limited C API for Python 3.9 and older access
     // directly PyObject.ob_refcnt.
 #if defined(Py_GIL_DISABLED)
-    uint32_t local = _Py_atomic_load_uint32_relaxed(&op->ob_ref_local);
-    uint32_t new_local = local + 1;
-    if (new_local == 0) {
-        _Py_INCREF_IMMORTAL_STAT_INC();
-        // local is equal to _Py_IMMORTAL_REFCNT_LOCAL: do nothing
-        return;
-    }
+    // gh-153202: load the local count unconditionally, in parallel with the
+    // ownership check below -- ob_ref_local and ob_tid are independent
+    // fields, so gating this load behind the ownership branch would
+    // serialize what can otherwise be two independent loads into one
+    // dependency chain, in every Py_INCREF call in the interpreter (see
+    // fix-summary.md 9.6 for the pyperformance evidence).
+    uint8_t local = _Py_atomic_load_uint8_relaxed(&op->ob_ref_local);
     if (_Py_IsOwnedByCurrentThread(op)) {
-        _Py_atomic_store_uint32_relaxed(&op->ob_ref_local, new_local);
+        if (local == UINT8_MAX) {
+            // ob_ref_local (a uint8_t) would overflow: spill the accumulated
+            // local count into the shared reference count rather than
+            // overflowing the field or immortalizing the object (immortality
+            // must not depend on ob_ref_local's width).
+            _Py_atomic_add_ssize(&op->ob_ref_shared,
+                _Py_STATIC_CAST(Py_ssize_t, local) << _Py_REF_SHARED_SHIFT);
+            _Py_atomic_store_uint8_relaxed(&op->ob_ref_local, 1);
+        }
+        else {
+            _Py_atomic_store_uint8_relaxed(&op->ob_ref_local,
+                _Py_STATIC_CAST(uint8_t, local + 1));
+        }
+    }
+    else if (_Py_IsImmortal(op)) {
+        _Py_INCREF_IMMORTAL_STAT_INC();
+        return;
     }
     else {
         _Py_atomic_add_ssize(&op->ob_ref_shared, (1 << _Py_REF_SHARED_SHIFT));
@@ -342,24 +384,27 @@ static inline void Py_DECREF(PyObject *op) {
 #elif defined(Py_GIL_DISABLED) && defined(Py_REF_DEBUG)
 static inline void Py_DECREF(const char *filename, int lineno, PyObject *op)
 {
-    uint32_t local = _Py_atomic_load_uint32_relaxed(&op->ob_ref_local);
-    if (local == _Py_IMMORTAL_REFCNT_LOCAL) {
-        _Py_DECREF_IMMORTAL_STAT_INC();
-        return;
-    }
-    _Py_DECREF_STAT_INC();
-    _Py_DECREF_DecRefTotal();
+    // gh-153202: see Py_INCREF -- load ob_ref_local unconditionally, in
+    // parallel with the ownership check, instead of gating it behind it.
+    uint8_t local = _Py_atomic_load_uint8_relaxed(&op->ob_ref_local);
     if (_Py_IsOwnedByCurrentThread(op)) {
         if (local == 0) {
             _Py_NegativeRefcount(filename, lineno, op);
         }
+        _Py_DECREF_STAT_INC();
+        _Py_DECREF_DecRefTotal();
         local--;
-        _Py_atomic_store_uint32_relaxed(&op->ob_ref_local, local);
+        _Py_atomic_store_uint8_relaxed(&op->ob_ref_local, local);
         if (local == 0) {
             _Py_MergeZeroLocalRefcount(op);
         }
     }
+    else if (_Py_IsImmortal(op)) {
+        _Py_DECREF_IMMORTAL_STAT_INC();
+    }
     else {
+        _Py_DECREF_STAT_INC();
+        _Py_DECREF_DecRefTotal();
         _Py_DecRefSharedDebug(op, filename, lineno);
     }
 }
@@ -368,20 +413,22 @@ static inline void Py_DECREF(const char *filename, int lineno, PyObject *op)
 #elif defined(Py_GIL_DISABLED)
 static inline void Py_DECREF(PyObject *op)
 {
-    uint32_t local = _Py_atomic_load_uint32_relaxed(&op->ob_ref_local);
-    if (local == _Py_IMMORTAL_REFCNT_LOCAL) {
-        _Py_DECREF_IMMORTAL_STAT_INC();
-        return;
-    }
-    _Py_DECREF_STAT_INC();
+    // gh-153202: see Py_INCREF -- load ob_ref_local unconditionally, in
+    // parallel with the ownership check, instead of gating it behind it.
+    uint8_t local = _Py_atomic_load_uint8_relaxed(&op->ob_ref_local);
     if (_Py_IsOwnedByCurrentThread(op)) {
+        _Py_DECREF_STAT_INC();
         local--;
-        _Py_atomic_store_uint32_relaxed(&op->ob_ref_local, local);
+        _Py_atomic_store_uint8_relaxed(&op->ob_ref_local, local);
         if (local == 0) {
             _Py_MergeZeroLocalRefcount(op);
         }
     }
+    else if (_Py_IsImmortal(op)) {
+        _Py_DECREF_IMMORTAL_STAT_INC();
+    }
     else {
+        _Py_DECREF_STAT_INC();
         _Py_DecRefShared(op);
     }
 }

@@ -81,8 +81,8 @@ whose size is determined when the object is allocated.
         _Py_STATICALLY_ALLOCATED_FLAG, \
         { 0 },                      \
         0,                          \
-        _Py_IMMORTAL_REFCNT_LOCAL,  \
         0,                          \
+        _Py_REF_SHARED_IMMORTAL,    \
         (type),                     \
     },
 #else
@@ -161,7 +161,7 @@ struct _object {
     uint16_t ob_flags;
     PyMutex ob_mutex;           // per-object lock
     uint8_t ob_gc_bits;         // gc-related state
-    uint32_t ob_ref_local;      // local reference count
+    uint8_t ob_ref_local;       // local reference count (only a few bits used)
     Py_ssize_t ob_ref_shared;   // shared (atomic) reference count
     PyTypeObject *ob_type;
 };
