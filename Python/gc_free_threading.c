@@ -241,7 +241,7 @@ merge_refcount(PyObject *op, Py_ssize_t extra)
     // No atomics necessary; all other threads in this interpreter are paused.
     op->ob_tid = 0;
     op->ob_ref_local = 0;
-    op->ob_ref_shared = _Py_REF_SHARED(refcount, _Py_REF_MERGED);
+    op->ob_ref_shared = _Py_STATIC_CAST(int32_t, _Py_REF_SHARED(refcount, _Py_REF_MERGED));
     return refcount;
 }
 
@@ -1806,7 +1806,7 @@ static int
 visit_decref_unreachable(PyObject *op, void *data)
 {
     if (gc_is_unreachable(op) && _PyObject_GC_IS_TRACKED(op)) {
-        op->ob_ref_local -= 1;
+        op->gc_scratch--;
     }
     return 0;
 }
@@ -1841,11 +1841,42 @@ _PyGC_VisitFrameStack(_PyInterpreterFrame *frame, visitproc visit, void *arg)
 static int
 handle_resurrected_objects(struct collection_state *state)
 {
-    // First, find externally reachable objects by computing the reference
-    // count difference in ob_ref_local. We can't use ob_tid here because
-    // that's already used to store the unreachable worklist.
+    // First, find externally reachable objects by computing, for each
+    // unreachable object, the number of references that come from *outside*
+    // the unreachable set.
+    //
+    // We can't store that count in `ob_ref_local` (narrowed to 8 bits, can't
+    // hold an arbitrary count -- a single cycle can have well over 255
+    // cross-references to one object) or in `ob_tid`/`ob_ref_shared` (already
+    // holding the unreachable worklist and the merged refcount). Instead this
+    // uses a dedicated `gc_scratch` field on the object (gh-153202 experiment,
+    // suggested by markshannon on the issue, replacing an earlier
+    // `_Py_hashtable_t` side table keyed by object -- see the issue thread for
+    // the performance rationale). This is the "full proposal" variant: unlike
+    // the earlier gc_scratch-only experiment, `ob_ref_shared` here has also
+    // been narrowed (to `int32_t`, not the literal `uint32_t` Mark suggested,
+    // because Python/brc.c's biased-refcounting scheme requires it to be able
+    // to go transiently negative), and the struct fields were reordered so
+    // that adding `gc_scratch` costs zero extra header bytes -- see
+    // Include/object.h.
     PyObject *op;
     struct worklist_iter iter;
+
+    // First pass: drop finalizer-untracked objects from the unreachable set,
+    // and set every remaining object's scratch counter to its own external-
+    // reference baseline (refcount minus the worklist's own reference).
+    //
+    // This must fully complete, for every object, before any decrements
+    // happen in the second pass below. gc_scratch is unsigned; the signed
+    // Py_ssize_t accumulator this replaced could go temporarily negative
+    // when a decrement (from another unreachable object's traversal, which
+    // can run before or after this object's own baseline is written,
+    // depending on worklist order) arrived before the baseline did. An
+    // unsigned counter can't represent that same temporary negative
+    // excursion -- it would wrap to a huge value instead -- so instead this
+    // splits the work into two passes: every baseline is written first, and
+    // only then does anything ever subtract from it, which never needs to
+    // go negative in a correct (non-buggy) traversal.
     WORKSTACK_FOR_EACH_ITER(&state->unreachable, &iter, op) {
         assert(gc_is_unreachable(op));
         assert(_Py_REF_IS_MERGED(op->ob_ref_shared));
@@ -1859,21 +1890,35 @@ handle_resurrected_objects(struct collection_state *state)
             continue;
         }
 
-        Py_ssize_t refcount = (op->ob_ref_shared >> _Py_REF_SHARED_SHIFT);
-        if (refcount > INT32_MAX) {
-            // The refcount is too big to fit in `ob_ref_local`. Mark the
-            // object as immortal and bail out.
-            gc_clear_unreachable(op);
-            worklist_remove(&iter);
-            _Py_SetImmortal(op);
-            continue;
-        }
+        Py_ssize_t refcount = Py_ARITHMETIC_RIGHT_SHIFT(int32_t,
+            op->ob_ref_shared, _Py_REF_SHARED_SHIFT);
 
-        op->ob_ref_local += (uint32_t)refcount;
+        // refcount can still exceed UINT32_MAX in principle here: deferred-
+        // refcounted objects (module dicts, functions, code objects, type
+        // objects, ...) carry the _Py_REF_DEFERRED baseline in their shared
+        // count from the moment deferred refcounting is enabled, regardless
+        // of how many real references they have. With ob_ref_shared narrowed
+        // to int32_t, that baseline (_Py_REF_SHARED_COUNT_MAX / 2, ~2**28)
+        // is now comfortably inside uint32_t's range on its own, so this
+        // saturation is no longer load-bearing the way it was when
+        // ob_ref_shared was still Py_ssize_t-wide -- but it's kept anyway as
+        // a cheap, always-correct safety net: gc_scratch is only ever
+        // compared against zero below, so any value that would overflow
+        // uint32_t is equally valid as UINT32_MAX (definitely more than the
+        // worklist's own reference, so definitely externally reachable),
+        // whereas a raw narrowing cast could wrap around to an arbitrary,
+        // possibly small or zero, value and silently misreport the object as
+        // unreachable garbage.
+        Py_ssize_t external_refs = refcount - 1;
+        op->gc_scratch = (external_refs > UINT32_MAX)
+            ? UINT32_MAX : (uint32_t)external_refs;
+    }
 
-        // Subtract one to account for the reference from the worklist.
-        op->ob_ref_local -= 1;
-
+    // Second pass: every remaining unreachable object's baseline is now set,
+    // so it's safe to subtract one from each target for every reference that
+    // originates from another unreachable object, leaving each object's
+    // count of references from *outside* the unreachable set.
+    WORKSTACK_FOR_EACH(&state->unreachable, op) {
         traverseproc traverse = Py_TYPE(op)->tp_traverse;
         (void)traverse(op, visit_decref_unreachable, NULL);
     }
@@ -1881,12 +1926,9 @@ handle_resurrected_objects(struct collection_state *state)
     // Find resurrected objects
     bool any_resurrected = false;
     WORKSTACK_FOR_EACH(&state->unreachable, op) {
-        int32_t gc_refs = (int32_t)op->ob_ref_local;
-        op->ob_ref_local = 0;  // restore ob_ref_local
+        uint32_t gc_refs_count = op->gc_scratch;
 
-        _PyObject_ASSERT(op, gc_refs >= 0);
-
-        if (gc_is_unreachable(op) && gc_refs > 0) {
+        if (gc_is_unreachable(op) && gc_refs_count > 0) {
             // Clear the unreachable flag on any transitively reachable objects
             // from this one.
             any_resurrected = true;

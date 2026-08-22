@@ -62,7 +62,7 @@ static inline int _is_dead(PyObject *obj)
     // be able to "see" the target object even though it is supposed to be
     // unreachable.  See issue gh-60806.
 #if defined(Py_GIL_DISABLED)
-    Py_ssize_t shared = _Py_atomic_load_ssize_relaxed(&obj->ob_ref_shared);
+    int32_t shared = _Py_atomic_load_int32_relaxed(&obj->ob_ref_shared);
     return shared == _Py_REF_SHARED(0, _Py_REF_MERGED);
 #else
     return (Py_REFCNT(obj) == 0);

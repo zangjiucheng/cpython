@@ -181,8 +181,8 @@ _PyObject_MergePerThreadRefcounts(_PyThreadStateImpl *tstate)
         Py_ssize_t refcnt = tstate->refcounts.values[i];
         if (refcnt != 0) {
             PyObject *obj = pool->table[i].obj;
-            _Py_atomic_add_ssize(&obj->ob_ref_shared,
-                                 refcnt << _Py_REF_SHARED_SHIFT);
+            _Py_atomic_add_int32(&obj->ob_ref_shared,
+                                 _Py_STATIC_CAST(int32_t, refcnt << _Py_REF_SHARED_SHIFT));
             tstate->refcounts.values[i] = 0;
         }
     }

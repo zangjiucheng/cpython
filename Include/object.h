@@ -81,7 +81,8 @@ whose size is determined when the object is allocated.
         _Py_STATICALLY_ALLOCATED_FLAG, \
         { 0 },                      \
         0,                          \
-        _Py_IMMORTAL_REFCNT_LOCAL,  \
+        0,                          \
+        _Py_REF_SHARED_IMMORTAL,    \
         0,                          \
         (type),                     \
     },
@@ -161,8 +162,34 @@ struct _object {
     uint16_t ob_flags;
     PyMutex ob_mutex;           // per-object lock
     uint8_t ob_gc_bits;         // gc-related state
-    uint32_t ob_ref_local;      // local reference count
-    Py_ssize_t ob_ref_shared;   // shared (atomic) reference count
+    uint8_t ob_ref_local;       // local reference count (only a few bits used)
+    // ob_ref_shared can be transiently *negative* (see Python/brc.c) when a
+    // non-owning thread decrefs an object before the owning thread has
+    // merged in its own local count, so this must stay a signed type -- an
+    // unsigned type would turn that legitimate negative state into a huge
+    // wraparound value and corrupt every comparison against it (including
+    // the immortal-threshold checks below). int32_t (gh-153202 full
+    // proposal, following markshannon's suggestion on the issue) preserves
+    // that sign correctly while still halving this field from Py_ssize_t.
+    int32_t ob_ref_shared;      // shared (atomic) reference count
+    // gh-153202 experiment: scratch space for the cyclic GC's incoming-
+    // reference count during stop-the-world collection (see
+    // handle_resurrected_objects() in Python/gc_free_threading.c), replacing
+    // a _Py_hashtable_t side table keyed by object. Meaningless outside of a
+    // collection pass; every object that reaches it is unconditionally
+    // written before being read, so it needs no initialization at object
+    // creation.
+    uint32_t gc_scratch;
+    // ob_type is deliberately placed after ob_ref_shared/gc_scratch rather
+    // than before: the two adjacent 4-byte fields above pack into the same
+    // alignment gap ob_ref_shared alone used to leave before the 8-byte-
+    // aligned tail, so sizeof(PyObject) stays 32 bytes -- confirmed by an
+    // offsetof/sizeof measurement, and pinned by
+    // test_capi.test_object.PyObjectSizeTest. This is what makes narrowing
+    // ob_ref_local (task 1) genuinely memory-neutral: on its own it saves
+    // nothing (the freed bytes are absorbed as padding regardless of
+    // reordering), but paired with also narrowing ob_ref_shared here, the
+    // freed space is enough to add gc_scratch for free instead.
     PyTypeObject *ob_type;
 };
 #endif // !defined(_Py_OPAQUE_PYOBJECT)

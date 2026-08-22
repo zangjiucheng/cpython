@@ -433,6 +433,44 @@ class GCTests(unittest.TestCase):
         self.assertEqual((e, f), (0, 1))
         self.assertEqual((h, i), (0, 0))
 
+    def test_collect_cycle_with_many_cross_references(self):
+        # gh-153202: During cyclic collection the free-threaded GC computes,
+        # for each unreachable object, the number of references coming from
+        # outside the unreachable set. That scratch counter must be able to
+        # hold an arbitrary count; if it were bounded (e.g. to an 8-bit field)
+        # a cycle with more than 255 references to a single object would
+        # overflow it and cause the object to be falsely treated as still
+        # reachable (or crash). Build such a cycle between just two objects and
+        # confirm it is collected.
+        N = 300  # comfortably more than 255
+
+        class Node:
+            pass
+
+        a = Node()
+        b = Node()
+        # Reference a <-> b N times each, forming one cycle with far more than
+        # 255 cross-references between the two objects.
+        a.refs = [b] * N
+        b.refs = [a] * N
+
+        ids = (id(a), id(b))
+        wr = (weakref.ref(a), weakref.ref(b))
+        del a, b
+
+        # Nothing outside the cycle references either object now, so a full
+        # collection must reclaim both of them with the correct result: no
+        # false immortalization and no crash.
+        gc.collect()
+
+        self.assertIsNone(wr[0]())
+        self.assertIsNone(wr[1]())
+        # The reclaimed objects must not linger as (falsely immortalized)
+        # tracked objects.
+        live_ids = {id(o) for o in gc.get_objects()}
+        self.assertNotIn(ids[0], live_ids)
+        self.assertNotIn(ids[1], live_ids)
+
     def test_trashcan(self):
         class Ouch:
             n = 0

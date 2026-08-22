@@ -1,6 +1,7 @@
 import enum
 import os
 import pickle
+import struct
 import sys
 import textwrap
 import unittest
@@ -224,6 +225,18 @@ class IsUniquelyReferencedTest(unittest.TestCase):
         self.assertFalse(_testcapi.is_uniquely_referenced(42))
         # CRASHES is_uniquely_referenced(NULL)
 
+@unittest.skipUnless(support.Py_GIL_DISABLED, 'requires free-threaded build')
+class RefcountSpillTest(unittest.TestCase):
+    """gh-153202: ob_ref_local overflow must spill into ob_ref_shared rather
+    than immortalizing the object."""
+    def test_refcount_spill(self):
+        # Drives at least two overflow-spill cycles on one object and confirms
+        # it stays mortal, keeps a correct refcount, and deallocates when its
+        # reference count (including the spilled shared count) reaches zero.
+        # The C helper raises AssertionError on any failure.
+        _testcapi.test_refcount_spill()
+
+
 class CAPITest(unittest.TestCase):
     def check_negative_refcount(self, code):
         # bpo-35059: Check that Py_DECREF() reports the correct filename
@@ -340,6 +353,65 @@ class CAPITest(unittest.TestCase):
         # test NULL object
         output = self.pyobject_dump(NULL)
         self.assertRegex(output, r'<object at .* is freed>')
+
+
+@support.cpython_only
+class PyObjectSizeTest(unittest.TestCase):
+    # sizeof(PyObject) is exported to out-of-process debuggers and remote
+    # profilers (PEP 768) through several surfaces that all derive from the
+    # same C expression:
+    #   * _Py_DebugOffsets.pyobject.size  (Include/internal/pycore_debug_offsets.h)
+    #   * _testinternalcapi.SIZEOF_PYOBJECT (Modules/_testinternalcapi.c)
+    #   * SIZEOF_PYOBJECT in Modules/_remote_debugging/_remote_debugging.h
+    # A width change to a PyObject header field (e.g. ob_ref_local /
+    # ob_ref_shared in the free-threaded build) therefore silently changes the
+    # exported size with no signal to tooling that cached the old layout.  Pin
+    # the value so such a change trips this test and forces a conscious update
+    # plus a decision about bumping _Py_DebugOffsets.version.
+
+    def test_sizeof_pyobject_matches_base_object(self):
+        # The exported diagnostic must track the real object layout.  The base
+        # ``object`` type stores nothing beyond a PyObject, so its basic size
+        # is exactly sizeof(PyObject); if the two ever disagree, the exported
+        # debug-offsets data has drifted from reality.
+        self.assertEqual(_testinternalcapi.SIZEOF_PYOBJECT,
+                         object.__basicsize__)
+
+    def test_sizeof_pyobject_pinned(self):
+        # Independently recompute sizeof(PyObject) from the documented header
+        # layout (Include/object.h).  Changing a field width forces this
+        # expectation to be updated in lockstep, which is the point.
+        pointer = struct.calcsize('P')
+        if support.Py_GIL_DISABLED:
+            # struct _object (free-threaded build, gh-153202 full proposal):
+            #   uintptr_t     ob_tid          (P)
+            #   uint16_t      ob_flags        (H)
+            #   PyMutex       ob_mutex        (B)
+            #   uint8_t       ob_gc_bits      (B)
+            #   uint8_t       ob_ref_local    (B)
+            #   int32_t       ob_ref_shared   (i)
+            #   uint32_t      gc_scratch      (I)
+            #   PyTypeObject *ob_type         (P)
+            # gc_scratch (replacing a _Py_hashtable_t GC side table -- see
+            # handle_resurrected_objects() in Python/gc_free_threading.c) is
+            # memory-neutral here: narrowing ob_ref_shared from Py_ssize_t to
+            # int32_t (signed, because Python/brc.c requires it to be able to
+            # go transiently negative -- not the literal uint32_t originally
+            # suggested on the issue) frees exactly the bytes gc_scratch
+            # needs, and placing ob_type *after* both narrow fields instead of
+            # before lets them share the alignment gap ob_ref_shared alone
+            # used to leave before the 8-byte-aligned tail. Net size is
+            # unchanged from the pre-experiment 32-byte layout. Unlike a real
+            # C compiler, struct.calcsize() aligns each field but does not
+            # round the total up to the struct's largest member alignment; no
+            # explicit trailing padding is needed here only because the
+            # struct happens to already end on an 8-byte boundary (P is last).
+            expected = struct.calcsize('PHBBBiIP')
+        else:
+            # struct _object (default build): a pointer-sized refcount union
+            # followed by the ob_type pointer.
+            expected = 2 * pointer
+        self.assertEqual(_testinternalcapi.SIZEOF_PYOBJECT, expected)
 
 
 if __name__ == "__main__":
