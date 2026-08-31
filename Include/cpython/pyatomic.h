@@ -524,6 +524,12 @@ static inline void
 _Py_atomic_store_ssize_release(Py_ssize_t *obj, Py_ssize_t value);
 
 static inline void
+_Py_atomic_store_int32_release(int32_t *obj, int32_t value);
+
+static inline int32_t
+_Py_atomic_load_int32_acquire(const int32_t *obj);
+
+static inline void
 _Py_atomic_store_int8_release(int8_t *obj, int8_t value);
 
 static inline void

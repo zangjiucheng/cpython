@@ -378,8 +378,8 @@ _Py_DecRefSharedIsDead(PyObject *o, const char *filename, int lineno)
     // Should we queue the object for the owning thread to merge?
     int should_queue;
 
-    Py_ssize_t new_shared;
-    Py_ssize_t shared = _Py_atomic_load_ssize_relaxed(&o->ob_ref_shared);
+    int32_t new_shared;
+    int32_t shared = _Py_atomic_load_int32_relaxed(&o->ob_ref_shared);
     do {
         should_queue = (shared == 0 || shared == _Py_REF_MAYBE_WEAKREF);
 
@@ -403,7 +403,7 @@ _Py_DecRefSharedIsDead(PyObject *o, const char *filename, int lineno)
             _Py_NegativeRefcount(filename, lineno, o);
         }
 #endif
-    } while (!_Py_atomic_compare_exchange_ssize(&o->ob_ref_shared,
+    } while (!_Py_atomic_compare_exchange_int32(&o->ob_ref_shared,
                                                 &shared, new_shared));
 
     if (should_queue) {
@@ -433,12 +433,41 @@ _Py_DecRefShared(PyObject *o)
     _Py_DecRefSharedDebug(o, NULL, 0);
 }
 
+#ifdef Py_GIL_DISABLED
+// Validate the ob_ref_shared layout used to mark immortal objects (see
+// Include/refcount.h). The immortal count values must sit within the
+// representable shared count range, and the stored ob_ref_shared marker must
+// remain a positive int32_t so that a plain arithmetic-right-shift check can
+// distinguish immortal objects from ordinary ones with (bounded) large counts.
+static_assert(_Py_IMMORTAL_MINIMUM_SHARED_REFCNT > 0
+              && _Py_IMMORTAL_INITIAL_SHARED_REFCNT >= _Py_IMMORTAL_MINIMUM_SHARED_REFCNT
+              && _Py_IMMORTAL_INITIAL_SHARED_REFCNT <= _Py_REF_SHARED_COUNT_MAX,
+              "immortal shared refcount must fit in the ob_ref_shared count range");
+static_assert(_Py_REF_SHARED_IMMORTAL > 0,
+              "immortal ob_ref_shared marker must be a positive int32_t");
+// gh-153202: _Py_REF_DEFERRED (pycore_object.h) is added, alone, to the
+// shared count of every deferred-refcounted object (module dicts, functions,
+// code objects, ...) the instant deferred refcounting is enabled -- before
+// that object accrues a single real reference. If the immortal threshold
+// were ever at or below _Py_REF_DEFERRED, every such object would be
+// misreported as immortal from birth, corrupting GC/refcount handling for
+// it (this exact collision shipped once and crashed every _bootstrap_python
+// invocation via a lost GC-tracked bit on interp->builtins; see
+// bug-fix/gh-153202/fix-summary.md). Require a wide margin above
+// _Py_REF_DEFERRED, not just strict inequality, since a deferred object's
+// count legitimately fluctuates above that baseline as real references
+// come and go.
+static_assert(_Py_IMMORTAL_MINIMUM_SHARED_REFCNT
+              > _Py_REF_DEFERRED + (_Py_REF_SHARED_COUNT_MAX / 8),
+              "immortal threshold must stay well clear of _Py_REF_DEFERRED");
+#endif
+
 void
 _Py_MergeZeroLocalRefcount(PyObject *op)
 {
     assert(op->ob_ref_local == 0);
 
-    Py_ssize_t shared = _Py_atomic_load_ssize_acquire(&op->ob_ref_shared);
+    int32_t shared = _Py_atomic_load_int32_acquire(&op->ob_ref_shared);
     if (shared == 0) {
         // Fast-path: shared refcount is zero (including flags)
         _Py_Dealloc(op);
@@ -451,10 +480,10 @@ _Py_MergeZeroLocalRefcount(PyObject *op)
     _Py_atomic_store_uintptr_relaxed(&op->ob_tid, 0);
 
     // Slow-path: atomically set the flags (low two bits) to _Py_REF_MERGED.
-    Py_ssize_t new_shared;
+    int32_t new_shared;
     do {
         new_shared = (shared & ~_Py_REF_SHARED_FLAG_MASK) | _Py_REF_MERGED;
-    } while (!_Py_atomic_compare_exchange_ssize(&op->ob_ref_shared,
+    } while (!_Py_atomic_compare_exchange_int32(&op->ob_ref_shared,
                                                 &shared, new_shared));
 
     if (new_shared == _Py_REF_MERGED) {
@@ -475,20 +504,23 @@ _Py_ExplicitMergeRefcount(PyObject *op, Py_ssize_t extra)
 
     // gh-119999: Write to ob_ref_local and ob_tid before merging the refcount.
     Py_ssize_t local = (Py_ssize_t)op->ob_ref_local;
-    _Py_atomic_store_uint32_relaxed(&op->ob_ref_local, 0);
+    _Py_atomic_store_uint8_relaxed(&op->ob_ref_local, 0);
     _Py_atomic_store_uintptr_relaxed(&op->ob_tid, 0);
 
     Py_ssize_t refcnt;
-    Py_ssize_t new_shared;
-    Py_ssize_t shared = _Py_atomic_load_ssize_relaxed(&op->ob_ref_shared);
+    int32_t new_shared;
+    int32_t shared = _Py_atomic_load_int32_relaxed(&op->ob_ref_shared);
     do {
-        refcnt = Py_ARITHMETIC_RIGHT_SHIFT(Py_ssize_t, shared, _Py_REF_SHARED_SHIFT);
+        refcnt = Py_ARITHMETIC_RIGHT_SHIFT(int32_t, shared, _Py_REF_SHARED_SHIFT);
         refcnt += local;
         refcnt += extra;
 
-        new_shared = _Py_REF_SHARED(refcnt, _Py_REF_MERGED);
-    } while (!_Py_atomic_compare_exchange_ssize(&op->ob_ref_shared,
+        new_shared = _Py_STATIC_CAST(int32_t, _Py_REF_SHARED(refcnt, _Py_REF_MERGED));
+    } while (!_Py_atomic_compare_exchange_int32(&op->ob_ref_shared,
                                                 &shared, new_shared));
+    // An ordinary object's merged count must never reach the reserved immortal
+    // range, otherwise it would be misidentified as immortal.
+    assert(refcnt < _Py_IMMORTAL_MINIMUM_SHARED_REFCNT);
     return refcnt;
 }
 
@@ -2740,8 +2772,8 @@ new_reference(PyObject *op)
 #ifdef _Py_THREAD_SANITIZER
     _Py_atomic_store_uintptr_relaxed(&op->ob_tid, _Py_ThreadId());
     _Py_atomic_store_uint8_relaxed(&op->ob_gc_bits, 0);
-    _Py_atomic_store_uint32_relaxed(&op->ob_ref_local, 1);
-    _Py_atomic_store_ssize_relaxed(&op->ob_ref_shared, 0);
+    _Py_atomic_store_uint8_relaxed(&op->ob_ref_local, 1);
+    _Py_atomic_store_int32_relaxed(&op->ob_ref_shared, 0);
 #else
     op->ob_tid = _Py_ThreadId();
     op->ob_gc_bits = 0;
@@ -2779,8 +2811,8 @@ _Py_SetImmortalUntracked(PyObject *op)
     }
 #ifdef Py_GIL_DISABLED
     _Py_atomic_store_uintptr_relaxed(&op->ob_tid, _Py_UNOWNED_TID);
-    _Py_atomic_store_uint32_relaxed(&op->ob_ref_local, _Py_IMMORTAL_REFCNT_LOCAL);
-    _Py_atomic_store_ssize_relaxed(&op->ob_ref_shared, 0);
+    _Py_atomic_store_uint8_relaxed(&op->ob_ref_local, 0);
+    _Py_atomic_store_int32_relaxed(&op->ob_ref_shared, _Py_REF_SHARED_IMMORTAL);
     _Py_atomic_or_uint8(&op->ob_gc_bits, _PyGC_BITS_DEFERRED);
 #elif SIZEOF_VOID_P > 4
     op->ob_flags = _Py_IMMORTAL_FLAGS;
@@ -2840,7 +2872,8 @@ PyUnstable_Object_EnableDeferredRefcount(PyObject *op)
         // Someone beat us to it!
         return 0;
     }
-    _Py_atomic_add_ssize(&op->ob_ref_shared, _Py_REF_SHARED(_Py_REF_DEFERRED, 0));
+    _Py_atomic_add_int32(&op->ob_ref_shared,
+                          _Py_STATIC_CAST(int32_t, _Py_REF_SHARED(_Py_REF_DEFERRED, 0)));
     return 1;
 #else
     return 0;
@@ -3208,7 +3241,7 @@ _PyTrash_thread_destroy_chain(PyThreadState *tstate)
 #ifdef Py_GIL_DISABLED
         uintptr_t tagged_ptr = op->ob_tid;
         op->ob_tid = 0;
-        _Py_atomic_store_ssize_relaxed(&op->ob_ref_shared, _Py_REF_MERGED);
+        _Py_atomic_store_int32_relaxed(&op->ob_ref_shared, _Py_REF_MERGED);
 #else
         uintptr_t tagged_ptr = _Py_AS_GC(op)->_gc_next;
         _Py_AS_GC(op)->_gc_next = 0;
